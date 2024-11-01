@@ -1,2 +1,8 @@
-# Cognitive_Health_Monitoring_System_for_Spacecrafts
-An AI-based system utilizing Graph Neural Networks (GNNs) for real-time anomaly detection and fault diagnosis in spacecraft engines. It classifies anomalies and provides actionable recommendations, improving safety and predictive maintenance.
+Overview
+The Cognitive Health Monitoring System is designed to monitor the health of flying vehicles, specifically spacecraft engines. It leverages Graph Neural Networks (GNNs) to detect anomalies in time-series data from multiple sensors, classify them into point, contextual, and collective anomalies, and suggest tailored remedial actions. This system aims to improve fault prediction and operational efficiency, enabling safer and more reliable spacecraft operation.
+
+Key Features
+Real-Time Anomaly Detection: Detects various anomalies in sensor data using GNNs.
+Anomaly Classification: Classifies detected anomalies as point, contextual, or collective.
+Fault Diagnosis and Remedial Actions: Provides actionable recommendations based on detected anomalies.
+Data Flexibility: Can handle multivariate time-series data across multiple sensors.
