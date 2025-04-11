@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import json
 from datetime import datetime
 
@@ -32,53 +32,79 @@ class GNNAnomalyDetector(torch.nn.Module):
 
 def load_data_from_db(engine):
     # Query to get the last 100 flights ordered by date
-    query = """
-        SELECT id, ac, hl,
-            esn,
-            flight,
-            date,
-            cdate,
-            "EGT1" as "egt1",
-            "EGT2" as "egt2",
-            "EGT3" as "egt3",
-            "EGT4" as "egt4"
-        FROM ( SELECT b.id,
-                    b.ac,
-                    b."AIRCRAFTID" AS hl,
-                    b.cdate::timestamp without time zone AS cdate,
-                    b."FLTNUMBER" AS flight,
-                    b."timestamp"::timestamp without time zone AS date,
-                    b."EGT1_L" AS "EGT1",
-                    b."EGT2_L" AS "EGT2",
-                    b."EGT3_L" AS "EGT3",
-                    b."EGT4_L" AS "EGT4",
-                        CASE
-                            WHEN e.hl = regexp_replace(b."AIRCRAFTID", '\D'::text, ''::text, 'g'::text) AND e.pos = '1'::text THEN regexp_replace(e.esn, '\D'::text, ''::text, 'g'::text)
-                            ELSE NULL::text
-                        END AS esn
-                FROM b777.b777_acm210 b
-                    JOIN public.enginfo e ON e.hl = regexp_replace(b."AIRCRAFTID", '\D'::text, ''::text, 'g'::text) AND e.pos = '1'::text AND e.install_date <= b."timestamp"::timestamp without time zone
-                UNION ALL
-                SELECT b.id,
-                    b.ac,
-                    b."AIRCRAFTID" AS hl,
-                    b.cdate::timestamp without time zone AS cdate,
-                    b."FLTNUMBER" AS flight,
-                    b."timestamp"::timestamp without time zone AS date,
-                    b."EGT1_R" AS "EGT1",
-                    b."EGT2_R" AS "EGT2",
-                    b."EGT3_R" AS "EGT3",
-                    b."EGT4_R" AS "EGT4",
-                        CASE
-                            WHEN e.hl = regexp_replace(b."AIRCRAFTID", '\D'::text, ''::text, 'g'::text) AND e.pos = '2'::text THEN regexp_replace(e.esn, '\D'::text, ''::text, 'g'::text)
-                            ELSE NULL::text
-                        END AS esn
-                FROM b777.b777_acm210 b
-                    JOIN public.enginfo e ON e.hl = regexp_replace(b."AIRCRAFTID", '\D'::text, ''::text, 'g'::text) AND e.pos = '2'::text AND e.install_date <= b."timestamp"::timestamp without time zone) unnamed_subquery
-        WHERE date IS NOT NULL AND "EGT1" IS NOT NULL AND esn IS NOT NULL AND "EGT2" IS NOT NULL AND "EGT3" IS NOT NULL AND "EGT4" IS NOT NULL
-            ORDER BY date DESC 
-            LIMIT 2000
-    """
+    query =  text(r"""
+        WITH acm_base AS (
+            SELECT
+                id,
+                ac,
+                "AIRCRAFTID" AS hl_original, -- Keep original if needed elsewhere, otherwise remove
+                regexp_replace("AIRCRAFTID", '\D', '', 'g') AS hl_numeric, -- Calculate numeric hl
+                cdate::timestamp without time zone AS cdate,
+                "FLTNUMBER" AS flight,
+                "timestamp"::timestamp without time zone AS date,
+                "EGT1_L",
+                "EGT2_L",
+                "EGT3_L",
+                "EGT4_L",
+                "EGT1_R",
+                "EGT2_R",
+                "EGT3_R",
+                "EGT4_R"
+            FROM
+                b777.b777_acm210
+            WHERE
+                "timestamp" IS NOT NULL -- Apply date filter early if possible
+        ),
+        eng_info_base AS (
+            SELECT
+                hl,
+                pos,
+                install_date,
+                regexp_replace(esn, '\D', '', 'g') AS esn_numeric -- Calculate numeric esn
+            FROM
+                public.enginfo
+        )
+        SELECT
+            b.id,
+            b.ac,
+            b.hl_original AS hl, -- Use the original hl format for output
+            b.date,
+            b.cdate,
+            b.flight,
+            e.esn_numeric AS esn, -- Use the calculated numeric esn
+            -- Select EGT based on engine position
+            CASE e.pos
+                WHEN '1' THEN b."EGT1_L"
+                WHEN '2' THEN b."EGT1_R"
+            END AS egt1,
+            CASE e.pos
+                WHEN '1' THEN b."EGT2_L"
+                WHEN '2' THEN b."EGT2_R"
+            END AS egt2,
+            CASE e.pos
+                WHEN '1' THEN b."EGT3_L"
+                WHEN '2' THEN b."EGT3_R"
+            END AS egt3,
+            CASE e.pos
+                WHEN '1' THEN b."EGT4_L"
+                WHEN '2' THEN b."EGT4_R"
+            END AS egt4
+        FROM
+            acm_base b
+        JOIN
+            eng_info_base e ON b.hl_numeric = e.hl -- Join on calculated numeric hl
+                        AND e.pos IN ('1', '2') -- Match either position
+                        AND e.install_date <= b.date -- Match install date condition
+        WHERE
+            e.esn_numeric IS NOT NULL AND e.esn_numeric <> '' -- Added check for empty string if needed
+            AND CASE e.pos
+                    WHEN '1' THEN b."EGT1_L" IS NOT NULL AND b."EGT2_L" IS NOT NULL AND b."EGT3_L" IS NOT NULL AND b."EGT4_L" IS NOT NULL
+                    WHEN '2' THEN b."EGT1_R" IS NOT NULL AND b."EGT2_R" IS NOT NULL AND b."EGT3_R" IS NOT NULL AND b."EGT4_R" IS NOT NULL
+                END
+        ORDER BY
+            b.date DESC
+        LIMIT 500;
+    """)
     df = pd.read_sql(query, engine)
     return df
 
@@ -87,7 +113,7 @@ def preprocess_data(df):
     features = df[['egt1', 'egt2', 'egt3', 'egt4']].values
     scaler = StandardScaler()
     scaled_features = scaler.fit_transform(features)
-    return scaled_features, df[['esn', 'flight', 'date', 'cdate', 'ac', 'hl']].values
+    return scaled_features, df[['ac', 'hl', 'esn', 'flight', 'date', 'cdate']].values
 
 def create_graph_data(features):
     num_nodes = features.shape[0]
@@ -191,12 +217,12 @@ def process_data(model, engine):
     
     # Create results DataFrame
     results = pd.DataFrame({
-        'esn': metadata[:, 0],
-        'flight': metadata[:, 1],
-        'date': metadata[:, 2],
-        'cdate': metadata[:, 3],
-        'ac': metadata[:, 4],
-        'hl': metadata[:, 5],
+        'ac': metadata[:, 0],
+        'hl': metadata[:, 1],
+        'esn': metadata[:, 2],
+        'flight': metadata[:, 3],
+        'date': metadata[:, 4],
+        'cdate': metadata[:, 5],
         'Anomaly': anomalies.numpy(),
         'Anomaly_Score': anomaly_scores.numpy(),
         'Point_Anomaly': point.numpy(),
